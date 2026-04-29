@@ -1,6 +1,11 @@
 import express from "express";
 import { Resend } from "resend";
+
 import { createTwilioClient, getVerifyServiceSid } from "../config/twilio.js";
+
+const resend = new Resend(process.env.RESEND_API_KEY, {
+  baseUrl: "https://api.eu.resend.com"
+});
 
 const router = express.Router();
 

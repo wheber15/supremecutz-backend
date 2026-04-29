@@ -1,6 +1,8 @@
 import { Resend } from "resend";
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const resend = new Resend(process.env.RESEND_API_KEY, {
+  baseUrl: "https://api.eu.resend.com"
+});
 
 const CLIENT_URL = process.env.CLIENT_URL || "http://localhost:5173";
 const EMAIL_FROM =
