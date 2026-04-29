@@ -1,11 +1,9 @@
 import express from "express";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import { createTwilioClient, getVerifyServiceSid } from "../config/twilio.js";
 
 const router = express.Router();
 
-// TEMP in-memory OTP store.
-// Fine for testing / single Render instance. Later we can move this to MongoDB/Redis.
 const emailOtps = new Map();
 
 function normalizeIrishPhone(phone) {
@@ -41,22 +39,20 @@ function cleanupExpiredEmailOtps() {
   }
 }
 
-function createEmailTransporter() {
-  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
-    throw new Error("EMAIL_USER or EMAIL_PASS is missing");
+function getResendClient() {
+  if (!process.env.RESEND_API_KEY) {
+    throw new Error("RESEND_API_KEY is missing");
   }
 
-  return nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS
-    }
-  });
+  return new Resend(process.env.RESEND_API_KEY);
+}
+
+function getEmailFrom() {
+  return process.env.EMAIL_FROM || "Supreme Cutz <onboarding@resend.dev>";
 }
 
 /* =========================
-   PHONE OTP (TWILIO)
+   PHONE OTP - TWILIO
 ========================= */
 
 router.post("/start", async (req, res) => {
@@ -85,6 +81,7 @@ router.post("/start", async (req, res) => {
     });
   } catch (error) {
     console.error("Verify start error:", error.message);
+
     res.status(500).json({
       message: "Failed to send verification code",
       error: error.message
@@ -125,6 +122,7 @@ router.post("/check", async (req, res) => {
     });
   } catch (error) {
     console.error("Verify check error:", error.message);
+
     res.status(500).json({
       message: "Failed to verify code",
       error: error.message
@@ -133,7 +131,7 @@ router.post("/check", async (req, res) => {
 });
 
 /* =========================
-   EMAIL OTP
+   EMAIL OTP - RESEND
 ========================= */
 
 router.post("/email/start", async (req, res) => {
@@ -147,10 +145,13 @@ router.post("/email/start", async (req, res) => {
     }
 
     if (!isValidEmail(email)) {
-      return res.status(400).json({ message: "Please enter a valid email address" });
+      return res.status(400).json({
+        message: "Please enter a valid email address"
+      });
     }
 
     const existing = emailOtps.get(email);
+
     if (existing?.lastSentAt && Date.now() - existing.lastSentAt < 60 * 1000) {
       return res.status(429).json({
         message: "Please wait before requesting another email code"
@@ -166,26 +167,53 @@ router.post("/email/start", async (req, res) => {
       expires: Date.now() + 10 * 60 * 1000
     });
 
-    const transporter = createEmailTransporter();
+    const resend = getResendClient();
 
-    await transporter.sendMail({
-      from: `"Supreme Cutz" <${process.env.EMAIL_USER}>`,
+    const { error } = await resend.emails.send({
+      from: getEmailFrom(),
       to: email,
       subject: "Your Supreme Cutz Verification Code",
       html: `
-        <div style="font-family:Arial,sans-serif;background:#0b0b0f;color:#ffffff;padding:24px;border-radius:16px;">
-          <p style="letter-spacing:3px;text-transform:uppercase;color:#d4af37;font-size:12px;margin:0 0 12px;">Supreme Cutz</p>
-          <h2 style="margin:0 0 16px;">Verify your booking</h2>
-          <p style="color:#cccccc;">Your verification code is:</p>
-          <div style="font-size:34px;font-weight:800;letter-spacing:6px;color:#d4af37;margin:18px 0;">${code}</div>
-          <p style="color:#aaaaaa;">This code expires in 10 minutes. If you did not request this, you can ignore it.</p>
+        <div style="margin:0;padding:0;background:#050507;font-family:Arial,sans-serif;color:#ffffff;">
+          <div style="max-width:560px;margin:0 auto;padding:28px;">
+            <div style="border:1px solid rgba(212,175,55,0.25);background:#0b0b0f;border-radius:22px;padding:28px;">
+              <p style="margin:0 0 14px;letter-spacing:4px;text-transform:uppercase;color:#d4af37;font-size:12px;font-weight:700;">
+                Supreme Cutz
+              </p>
+
+              <h1 style="margin:0 0 14px;font-size:28px;line-height:1.15;color:#ffffff;">
+                Verify your booking
+              </h1>
+
+              <p style="margin:0 0 18px;color:#cfcfcf;font-size:15px;line-height:1.6;">
+                Use the secure code below to continue your appointment booking.
+              </p>
+
+              <div style="margin:22px 0;padding:22px;border-radius:18px;background:rgba(212,175,55,0.12);border:1px solid rgba(212,175,55,0.25);text-align:center;">
+                <div style="font-size:38px;letter-spacing:8px;font-weight:900;color:#d4af37;">
+                  ${code}
+                </div>
+              </div>
+
+              <p style="margin:0;color:#a9a9a9;font-size:14px;line-height:1.6;">
+                This code expires in 10 minutes. If you did not request this code, you can safely ignore this email.
+              </p>
+            </div>
+          </div>
         </div>
       `
     });
 
-    res.json({ message: "Email verification code sent" });
+    if (error) {
+      throw new Error(error.message || "Resend failed to send email");
+    }
+
+    res.json({
+      message: "Email verification code sent"
+    });
   } catch (error) {
     console.error("Email OTP error:", error.message);
+
     res.status(500).json({
       message: "Failed to send email OTP",
       error: error.message
@@ -201,22 +229,30 @@ router.post("/email/check", async (req, res) => {
     const code = String(req.body.code || "").trim();
 
     if (!email || !code) {
-      return res.status(400).json({ message: "Email and code are required" });
+      return res.status(400).json({
+        message: "Email and code are required"
+      });
     }
 
     const record = emailOtps.get(email);
 
     if (!record) {
-      return res.status(400).json({ message: "No OTP found or OTP expired" });
+      return res.status(400).json({
+        message: "No OTP found or OTP expired"
+      });
     }
 
     if (record.expires < Date.now()) {
       emailOtps.delete(email);
-      return res.status(400).json({ message: "OTP expired" });
+
+      return res.status(400).json({
+        message: "OTP expired"
+      });
     }
 
     if (record.attempts >= 5) {
       emailOtps.delete(email);
+
       return res.status(400).json({
         message: "Too many attempts. Please request a new code."
       });
@@ -225,7 +261,9 @@ router.post("/email/check", async (req, res) => {
     record.attempts += 1;
 
     if (record.code !== code) {
-      return res.status(400).json({ message: "Invalid OTP" });
+      return res.status(400).json({
+        message: "Invalid OTP"
+      });
     }
 
     emailOtps.delete(email);
@@ -236,6 +274,7 @@ router.post("/email/check", async (req, res) => {
     });
   } catch (error) {
     console.error("Email verify error:", error.message);
+
     res.status(500).json({
       message: "Failed to verify email",
       error: error.message
