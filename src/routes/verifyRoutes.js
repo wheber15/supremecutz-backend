@@ -1,15 +1,25 @@
 import express from "express";
 import { Resend } from "resend";
-
 import { createTwilioClient, getVerifyServiceSid } from "../config/twilio.js";
-
-const resend = new Resend(process.env.RESEND_API_KEY, {
-  baseUrl: "https://api.eu.resend.com"
-});
 
 const router = express.Router();
 
+const RESEND_BASE_URL = "https://api.eu.resend.com";
 const emailOtps = new Map();
+
+function getResendClient() {
+  if (!process.env.RESEND_API_KEY) {
+    throw new Error("RESEND_API_KEY is missing");
+  }
+
+  return new Resend(process.env.RESEND_API_KEY, {
+    baseUrl: RESEND_BASE_URL
+  });
+}
+
+function getEmailFrom() {
+  return process.env.EMAIL_FROM || "Supreme Cutz <bookings@whsystems.ie>";
+}
 
 function normalizeIrishPhone(phone) {
   if (!phone) return "";
@@ -43,22 +53,6 @@ function cleanupExpiredEmailOtps() {
     }
   }
 }
-
-function getResendClient() {
-  if (!process.env.RESEND_API_KEY) {
-    throw new Error("RESEND_API_KEY is missing");
-  }
-
-  return new Resend(process.env.RESEND_API_KEY);
-}
-
-function getEmailFrom() {
-  return process.env.EMAIL_FROM || "Supreme Cutz <onboarding@resend.dev>";
-}
-
-/* =========================
-   PHONE OTP - TWILIO
-========================= */
 
 router.post("/start", async (req, res) => {
   try {
@@ -135,10 +129,6 @@ router.post("/check", async (req, res) => {
   }
 });
 
-/* =========================
-   EMAIL OTP - RESEND
-========================= */
-
 router.post("/email/start", async (req, res) => {
   try {
     cleanupExpiredEmailOtps();
@@ -179,33 +169,40 @@ router.post("/email/start", async (req, res) => {
       to: email,
       subject: "Your Supreme Cutz Verification Code",
       html: `
-        <div style="margin:0;padding:0;background:#050507;font-family:Arial,sans-serif;color:#ffffff;">
-          <div style="max-width:560px;margin:0 auto;padding:28px;">
-            <div style="border:1px solid rgba(212,175,55,0.25);background:#0b0b0f;border-radius:22px;padding:28px;">
-              <p style="margin:0 0 14px;letter-spacing:4px;text-transform:uppercase;color:#d4af37;font-size:12px;font-weight:700;">
-                Supreme Cutz
-              </p>
+        <!DOCTYPE html>
+        <html>
+          <body style="margin:0;padding:0;background:#050507;font-family:Arial,sans-serif;color:#ffffff;">
+            <div style="max-width:620px;margin:0 auto;padding:28px 16px;">
+              <div style="border:1px solid rgba(212,175,55,0.28);border-radius:28px;background:#0b0b10;padding:30px;">
+                <p style="margin:0 0 14px;color:#d4af37;letter-spacing:5px;font-size:12px;font-weight:800;text-transform:uppercase;">
+                  Supreme Cutz
+                </p>
 
-              <h1 style="margin:0 0 14px;font-size:28px;line-height:1.15;color:#ffffff;">
-                Verify your booking
-              </h1>
+                <h1 style="margin:0 0 16px;font-size:34px;line-height:1.05;color:#ffffff;">
+                  Verify your booking
+                </h1>
 
-              <p style="margin:0 0 18px;color:#cfcfcf;font-size:15px;line-height:1.6;">
-                Use the secure code below to continue your appointment booking.
-              </p>
+                <p style="margin:0 0 24px;color:#d7d7d7;font-size:16px;line-height:1.7;">
+                  Use the secure code below to continue your appointment booking.
+                </p>
 
-              <div style="margin:22px 0;padding:22px;border-radius:18px;background:rgba(212,175,55,0.12);border:1px solid rgba(212,175,55,0.25);text-align:center;">
-                <div style="font-size:38px;letter-spacing:8px;font-weight:900;color:#d4af37;">
-                  ${code}
+                <div style="border:1px solid rgba(212,175,55,0.35);background:rgba(212,175,55,0.10);border-radius:22px;padding:22px;text-align:center;margin:22px 0;">
+                  <div style="font-size:46px;letter-spacing:10px;font-weight:900;color:#d4af37;">
+                    ${code}
+                  </div>
                 </div>
+
+                <p style="margin:0;color:#a9a9a9;font-size:14px;line-height:1.6;">
+                  This code expires in 10 minutes. If you did not request this code, you can safely ignore this email.
+                </p>
               </div>
 
-              <p style="margin:0;color:#a9a9a9;font-size:14px;line-height:1.6;">
-                This code expires in 10 minutes. If you did not request this code, you can safely ignore this email.
+              <p style="text-align:center;color:#777;font-size:12px;margin-top:18px;">
+                Supreme Cutz · Premium Barber Experience
               </p>
             </div>
-          </div>
-        </div>
+          </body>
+        </html>
       `
     });
 
