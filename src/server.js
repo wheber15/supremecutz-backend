@@ -16,6 +16,7 @@ import serviceRoutes from "./routes/serviceRoutes.js";
 import galleryRoutes from "./routes/galleryRoutes.js";
 import publicBookingRoutes from "./routes/publicBookingRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
+import customerAuthRoutes from "./routes/customerAuthRoutes.js";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -41,6 +42,7 @@ app.use("/api/services", serviceRoutes);
 app.use("/api/gallery", galleryRoutes);
 app.use("/api/public", publicBookingRoutes);
 app.use("/api/customers", customerRoutes);
+app.use("/api/customer-auth", customerAuthRoutes);
 
 async function startServer() {
   try {
