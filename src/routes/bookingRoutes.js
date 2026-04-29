@@ -1,9 +1,11 @@
+// server/src/routes/bookingRoutes.js
+
 import express from "express";
 import Booking from "../models/Booking.js";
-import Customer from "../models/Customer.js";
 import Location from "../models/Location.js";
 import User from "../models/User.js";
 import Service from "../models/Service.js";
+import Customer from "../models/Customer.js";
 import {
   sendBookingRequestReceivedEmail,
   sendBookingConfirmedEmail,
@@ -12,14 +14,6 @@ import {
 } from "../utils/bookingEmails.js";
 
 const router = express.Router();
-
-function normalizeEmail(email = "") {
-  return String(email).trim().toLowerCase();
-}
-
-function normalizePhone(phone = "") {
-  return String(phone).replace(/\s+/g, "").trim();
-}
 
 function formatDateToISO(date) {
   const year = date.getFullYear();
@@ -92,100 +86,14 @@ function getCustomSlotsForDate(location, bookingDate, dayName) {
   return null;
 }
 
-function buildCustomerConditions({ customerEmail, customerPhone }) {
-  const email = normalizeEmail(customerEmail);
-  const phone = normalizePhone(customerPhone);
-
+function buildCustomerMatch({ email, phone }) {
   const conditions = [];
 
-  if (email) conditions.push({ email });
-  if (phone) conditions.push({ phone });
-
-  return conditions;
-}
-
-async function findBlockedCustomer({ customerEmail, customerPhone }) {
-  const conditions = buildCustomerConditions({ customerEmail, customerPhone });
+  if (email) conditions.push({ email: String(email).trim().toLowerCase() });
+  if (phone) conditions.push({ phone: String(phone).trim() });
 
   if (!conditions.length) return null;
-
-  return Customer.findOne({
-    $or: conditions,
-    isActive: false
-  });
-}
-
-async function createOrUpdateCustomerFromBooking(booking) {
-  const email = normalizeEmail(booking.customerEmail);
-  const phone = normalizePhone(booking.customerPhone);
-
-  if (!phone && !email) return null;
-
-  const conditions = [];
-  if (email) conditions.push({ email });
-  if (phone) conditions.push({ phone });
-
-  const existingCustomer = await Customer.findOne({ $or: conditions });
-
-  if (existingCustomer) {
-    existingCustomer.fullName = booking.customerName || existingCustomer.fullName;
-    existingCustomer.phone = phone || existingCustomer.phone;
-    existingCustomer.email = email || existingCustomer.email;
-
-    if (booking.location) {
-      existingCustomer.preferredLocationId = booking.location;
-    }
-
-    if (booking.barber) {
-      existingCustomer.preferredBarber = String(booking.barber);
-    }
-
-    await existingCustomer.save();
-    return existingCustomer;
-  }
-
-  return Customer.create({
-    fullName: booking.customerName,
-    phone,
-    email,
-    preferredLocationId: booking.location || null,
-    preferredBarber: booking.barber ? String(booking.barber) : "",
-    isActive: true
-  });
-}
-
-async function updateCustomerStatsFromBooking(booking) {
-  const conditions = buildCustomerConditions({
-    customerEmail: booking.customerEmail,
-    customerPhone: booking.customerPhone
-  });
-
-  if (!conditions.length) return null;
-
-  const customer = await Customer.findOne({ $or: conditions });
-  if (!customer) return null;
-
-  const customerBookings = await Booking.find({
-    $or: [
-      customer.email ? { customerEmail: customer.email } : null,
-      customer.phone ? { customerPhone: customer.phone } : null
-    ].filter(Boolean)
-  }).populate("service", "price");
-
-  const completed = customerBookings.filter((item) => item.status === "completed");
-  const cancelled = customerBookings.filter((item) => item.status === "cancelled");
-
-  customer.completedVisits = completed.length;
-  customer.cancelledVisits = cancelled.length;
-  customer.loyaltyVisitsProgress = completed.length % 10;
-  customer.loyaltyPoints = completed.length * 10;
-  customer.totalSpend = completed.reduce(
-    (sum, item) => sum + Number(item.service?.price || 0),
-    0
-  );
-
-  await customer.save();
-  return customer;
+  return conditions.length === 1 ? conditions[0] : { $or: conditions };
 }
 
 async function getPopulatedBookingById(id) {
@@ -193,6 +101,74 @@ async function getPopulatedBookingById(id) {
     .populate("location", "name slug phone email")
     .populate("service", "name slug price durationMinutes")
     .populate("barber", "fullName barberDisplayName name barberSpecialty");
+}
+
+async function createOrUpdateCustomerFromBooking(bookingInput) {
+  const booking = await Booking.findById(bookingInput._id || bookingInput.id || bookingInput)
+    .populate("service", "price")
+    .lean();
+
+  if (!booking) return null;
+
+  const email = booking.customerEmail
+    ? String(booking.customerEmail).trim().toLowerCase()
+    : "";
+
+  const phone = booking.customerPhone ? String(booking.customerPhone).trim() : "";
+
+  const match = buildCustomerMatch({ email, phone });
+  if (!match) return null;
+
+  let customer = await Customer.findOne(match);
+
+  if (!customer) {
+    customer = await Customer.create({
+      fullName: booking.customerName || "Customer",
+      phone,
+      email,
+      preferredBarber: booking.barber || null,
+      preferredLocation: booking.location || null,
+      marketingEmailOptIn: false,
+      marketingSmsOptIn: false,
+      notes: "",
+      completedVisits: 0,
+      cancelledVisits: 0,
+      noShowCount: 0,
+      loyaltyPoints: 0,
+      loyaltyVisitsProgress: 0,
+      totalSpend: 0,
+      isActive: true
+    });
+  } else {
+    customer.fullName = booking.customerName || customer.fullName;
+    customer.phone = phone || customer.phone;
+    customer.email = email || customer.email;
+    customer.preferredBarber = customer.preferredBarber || booking.barber || null;
+    customer.preferredLocation = customer.preferredLocation || booking.location || null;
+  }
+
+  const bookings = await Booking.find(buildCustomerMatch({
+    email: customer.email,
+    phone: customer.phone
+  }))
+    .populate("service", "price")
+    .sort({ createdAt: -1 });
+
+  const completed = bookings.filter((item) => item.status === "completed");
+  const cancelled = bookings.filter((item) => item.status === "cancelled");
+
+  const totalSpend = completed.reduce((sum, item) => {
+    return sum + Number(item.service?.price || 0);
+  }, 0);
+
+  customer.completedVisits = completed.length;
+  customer.cancelledVisits = cancelled.length;
+  customer.loyaltyVisitsProgress = completed.length % 10;
+  customer.loyaltyPoints = completed.length * 10;
+  customer.totalSpend = totalSpend;
+
+  await customer.save();
+  return customer;
 }
 
 async function validateBookingRelations({ location, service, barber }) {
@@ -244,6 +220,28 @@ async function validateBookingRelations({ location, service, barber }) {
     selectedService,
     selectedBarber
   };
+}
+
+async function ensureCustomerCanBook({ customerEmail, customerPhone }) {
+  const email = customerEmail ? String(customerEmail).trim().toLowerCase() : "";
+  const phone = customerPhone ? String(customerPhone).trim() : "";
+
+  const match = buildCustomerMatch({ email, phone });
+  if (!match) return { ok: true };
+
+  const customer = await Customer.findOne(match);
+
+  if (!customer) return { ok: true };
+
+  if (customer.isActive === false) {
+    return {
+      ok: false,
+      status: 403,
+      message: "This customer account is currently blocked from making bookings."
+    };
+  }
+
+  return { ok: true, customer };
 }
 
 router.get("/", async (_req, res) => {
@@ -450,15 +448,14 @@ router.post("/", async (req, res) => {
       });
     }
 
-    const blockedCustomer = await findBlockedCustomer({
+    const customerCheck = await ensureCustomerCanBook({
       customerEmail,
       customerPhone
     });
 
-    if (blockedCustomer) {
-      return res.status(403).json({
-        message:
-          "This customer is currently blocked from making bookings. Please contact the shop."
+    if (!customerCheck.ok) {
+      return res.status(customerCheck.status).json({
+        message: customerCheck.message
       });
     }
 
@@ -475,8 +472,6 @@ router.post("/", async (req, res) => {
     }
 
     const normalizedBookingTime = normalizeTimeLabel(bookingTime);
-    const normalizedCustomerPhone = normalizePhone(customerPhone);
-    const normalizedCustomerEmail = normalizeEmail(customerEmail);
 
     const existingBooking = await Booking.findOne({
       barber,
@@ -499,29 +494,25 @@ router.post("/", async (req, res) => {
       bookingDate,
       bookingTime: normalizedBookingTime,
       customerName,
-      customerPhone: normalizedCustomerPhone,
-      customerEmail: normalizedCustomerEmail,
+      customerPhone,
+      customerEmail: customerEmail || "",
       notes: notes || "",
       phoneVerified: true
     });
 
     const populatedBooking = await getPopulatedBookingById(booking._id);
 
-    try {
-      await createOrUpdateCustomerFromBooking(booking);
-    } catch (customerError) {
-      console.error("Customer sync failed:", customerError.message);
-    }
-
-    try {
-      await sendBookingRequestReceivedEmail(populatedBooking || booking);
-    } catch (mailError) {
-      console.error("Request received email failed:", mailError.message);
-    }
-
     res.status(201).json({
       message: "Booking created successfully",
       booking: populatedBooking || booking
+    });
+
+    createOrUpdateCustomerFromBooking(booking).catch((customerError) => {
+      console.error("Customer sync failed:", customerError.message);
+    });
+
+    sendBookingRequestReceivedEmail(populatedBooking || booking).catch((mailError) => {
+      console.error("Request received email failed:", mailError.message);
     });
   } catch (error) {
     res.status(500).json({
@@ -584,18 +575,6 @@ router.put("/:id", async (req, res) => {
       });
     }
 
-    const blockedCustomer = await findBlockedCustomer({
-      customerEmail,
-      customerPhone
-    });
-
-    if (blockedCustomer) {
-      return res.status(403).json({
-        message:
-          "This customer is currently blocked from making bookings. Please contact the shop."
-      });
-    }
-
     const relationCheck = await validateBookingRelations({
       location: nextLocation,
       service: nextService,
@@ -624,8 +603,8 @@ router.put("/:id", async (req, res) => {
     }
 
     existingBooking.customerName = customerName;
-    existingBooking.customerPhone = normalizePhone(customerPhone);
-    existingBooking.customerEmail = normalizeEmail(customerEmail);
+    existingBooking.customerPhone = customerPhone;
+    existingBooking.customerEmail = customerEmail || "";
     existingBooking.bookingDate = nextBookingDate;
     existingBooking.bookingTime = nextBookingTime;
     existingBooking.status = nextStatus;
@@ -636,14 +615,11 @@ router.put("/:id", async (req, res) => {
 
     await existingBooking.save();
 
-    try {
-      await createOrUpdateCustomerFromBooking(existingBooking);
-      await updateCustomerStatsFromBooking(existingBooking);
-    } catch (customerError) {
-      console.error("Customer sync failed:", customerError.message);
-    }
-
     const updatedBooking = await getPopulatedBookingById(existingBooking._id);
+
+    createOrUpdateCustomerFromBooking(existingBooking).catch((customerError) => {
+      console.error("Customer sync failed:", customerError.message);
+    });
 
     res.json({
       message: "Booking updated successfully",
@@ -681,33 +657,32 @@ router.put("/:id/status", async (req, res) => {
 
     const populatedBooking = await getPopulatedBookingById(booking._id);
 
-    try {
-      await createOrUpdateCustomerFromBooking(booking);
-      await updateCustomerStatsFromBooking(booking);
-    } catch (customerError) {
-      console.error("Customer stats update failed:", customerError.message);
-    }
-
-    try {
-      if (status === "confirmed") {
-        await sendBookingConfirmedEmail(populatedBooking || booking);
-      }
-
-      if (status === "cancelled") {
-        await sendBookingCancelledEmail(populatedBooking || booking);
-      }
-
-      if (status === "completed") {
-        await sendBookingCompletedFeedbackEmail(populatedBooking || booking);
-      }
-    } catch (mailError) {
-      console.error("Status email failed:", mailError.message);
-    }
-
     res.json({
       message: "Booking status updated",
       booking: populatedBooking || booking
     });
+
+    createOrUpdateCustomerFromBooking(booking).catch((customerError) => {
+      console.error("Customer sync failed:", customerError.message);
+    });
+
+    if (status === "confirmed") {
+      sendBookingConfirmedEmail(populatedBooking || booking).catch((mailError) => {
+        console.error("Confirmed email failed:", mailError.message);
+      });
+    }
+
+    if (status === "cancelled") {
+      sendBookingCancelledEmail(populatedBooking || booking).catch((mailError) => {
+        console.error("Cancelled email failed:", mailError.message);
+      });
+    }
+
+    if (status === "completed") {
+      sendBookingCompletedFeedbackEmail(populatedBooking || booking).catch((mailError) => {
+        console.error("Feedback email failed:", mailError.message);
+      });
+    }
   } catch (error) {
     res.status(500).json({
       message: "Failed to update booking status",
@@ -725,6 +700,10 @@ router.delete("/:id", async (req, res) => {
         message: "Booking not found"
       });
     }
+
+    createOrUpdateCustomerFromBooking(booking).catch((customerError) => {
+      console.error("Customer sync failed after delete:", customerError.message);
+    });
 
     res.json({
       message: "Booking deleted successfully"
