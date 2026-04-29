@@ -15,7 +15,6 @@ import roleRoutes from "./routes/roleRoutes.js";
 import serviceRoutes from "./routes/serviceRoutes.js";
 import galleryRoutes from "./routes/galleryRoutes.js";
 import publicBookingRoutes from "./routes/publicBookingRoutes.js";
-import { verifyMailer } from "./config/mailer.js";
 import customerRoutes from "./routes/customerRoutes.js";
 
 const app = express();
@@ -51,8 +50,6 @@ async function startServer() {
 
     await mongoose.connect(process.env.MONGO_URI);
     console.log("MongoDB connected");
-
-    await verifyMailer();
 
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
