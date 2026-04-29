@@ -425,7 +425,9 @@ router.post("/", async (req, res) => {
       customerPhone,
       customerEmail,
       notes,
-      phoneVerified
+      phoneVerified,
+      emailVerified,
+      verificationMethod
     } = req.body;
 
     if (
@@ -435,16 +437,16 @@ router.post("/", async (req, res) => {
       !bookingDate ||
       !bookingTime ||
       !customerName ||
-      !customerPhone
+      (!customerPhone && !customerEmail)
     ) {
       return res.status(400).json({
         message: "Please fill in all required booking fields"
       });
     }
 
-    if (!phoneVerified) {
+    if (!phoneVerified && !emailVerified) {
       return res.status(400).json({
-        message: "Phone number must be verified before booking"
+        message: "Phone or email must be verified before booking"
       });
     }
 
@@ -497,7 +499,9 @@ router.post("/", async (req, res) => {
       customerPhone,
       customerEmail: customerEmail || "",
       notes: notes || "",
-      phoneVerified: true
+      phoneVerified: Boolean(phoneVerified),
+      emailVerified: Boolean(emailVerified),
+      verificationMethod: verificationMethod || (phoneVerified ? "phone" : "email")
     });
 
     const populatedBooking = await getPopulatedBookingById(booking._id);

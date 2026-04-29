@@ -4,7 +4,8 @@ import { createTwilioClient, getVerifyServiceSid } from "../config/twilio.js";
 
 const router = express.Router();
 
-// TEMP in-memory store (for testing)
+// TEMP in-memory OTP store.
+// Fine for testing / single Render instance. Later we can move this to MongoDB/Redis.
 const emailOtps = new Map();
 
 function normalizeIrishPhone(phone) {
@@ -18,8 +19,44 @@ function normalizeIrishPhone(phone) {
   return value;
 }
 
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(email));
+}
+
+function createOtpCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function cleanupExpiredEmailOtps() {
+  const now = Date.now();
+
+  for (const [email, record] of emailOtps.entries()) {
+    if (!record || record.expires < now) {
+      emailOtps.delete(email);
+    }
+  }
+}
+
+function createEmailTransporter() {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    throw new Error("EMAIL_USER or EMAIL_PASS is missing");
+  }
+
+  return nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
+    }
+  });
+}
+
 /* =========================
-   PHONE (TWILIO)
+   PHONE OTP (TWILIO)
 ========================= */
 
 router.post("/start", async (req, res) => {
@@ -96,43 +133,53 @@ router.post("/check", async (req, res) => {
 });
 
 /* =========================
-   EMAIL OTP (NEW 🔥)
+   EMAIL OTP
 ========================= */
 
-// send email OTP
 router.post("/email/start", async (req, res) => {
   try {
-    const { email } = req.body;
+    cleanupExpiredEmailOtps();
+
+    const email = normalizeEmail(req.body.email);
 
     if (!email) {
       return res.status(400).json({ message: "Email is required" });
     }
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    if (!isValidEmail(email)) {
+      return res.status(400).json({ message: "Please enter a valid email address" });
+    }
 
-    // store OTP (expires in 10 min)
+    const existing = emailOtps.get(email);
+    if (existing?.lastSentAt && Date.now() - existing.lastSentAt < 60 * 1000) {
+      return res.status(429).json({
+        message: "Please wait before requesting another email code"
+      });
+    }
+
+    const code = createOtpCode();
+
     emailOtps.set(email, {
       code,
+      attempts: 0,
+      lastSentAt: Date.now(),
       expires: Date.now() + 10 * 60 * 1000
     });
 
-    const transporter = nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-      }
-    });
+    const transporter = createEmailTransporter();
 
     await transporter.sendMail({
       from: `"Supreme Cutz" <${process.env.EMAIL_USER}>`,
       to: email,
-      subject: "Your Verification Code",
+      subject: "Your Supreme Cutz Verification Code",
       html: `
-        <h2>Supreme Cutz Verification</h2>
-        <p>Your code is:</p>
-        <h1>${code}</h1>
-        <p>This code expires in 10 minutes.</p>
+        <div style="font-family:Arial,sans-serif;background:#0b0b0f;color:#ffffff;padding:24px;border-radius:16px;">
+          <p style="letter-spacing:3px;text-transform:uppercase;color:#d4af37;font-size:12px;margin:0 0 12px;">Supreme Cutz</p>
+          <h2 style="margin:0 0 16px;">Verify your booking</h2>
+          <p style="color:#cccccc;">Your verification code is:</p>
+          <div style="font-size:34px;font-weight:800;letter-spacing:6px;color:#d4af37;margin:18px 0;">${code}</div>
+          <p style="color:#aaaaaa;">This code expires in 10 minutes. If you did not request this, you can ignore it.</p>
+        </div>
       `
     });
 
@@ -146,21 +193,36 @@ router.post("/email/start", async (req, res) => {
   }
 });
 
-// verify email OTP
 router.post("/email/check", async (req, res) => {
   try {
-    const { email, code } = req.body;
+    cleanupExpiredEmailOtps();
+
+    const email = normalizeEmail(req.body.email);
+    const code = String(req.body.code || "").trim();
+
+    if (!email || !code) {
+      return res.status(400).json({ message: "Email and code are required" });
+    }
 
     const record = emailOtps.get(email);
 
     if (!record) {
-      return res.status(400).json({ message: "No OTP found" });
+      return res.status(400).json({ message: "No OTP found or OTP expired" });
     }
 
     if (record.expires < Date.now()) {
       emailOtps.delete(email);
       return res.status(400).json({ message: "OTP expired" });
     }
+
+    if (record.attempts >= 5) {
+      emailOtps.delete(email);
+      return res.status(400).json({
+        message: "Too many attempts. Please request a new code."
+      });
+    }
+
+    record.attempts += 1;
 
     if (record.code !== code) {
       return res.status(400).json({ message: "Invalid OTP" });
