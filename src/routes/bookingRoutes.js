@@ -1,5 +1,6 @@
 import express from "express";
 import Booking from "../models/Booking.js";
+import Customer from "../models/Customer.js";
 import Location from "../models/Location.js";
 import User from "../models/User.js";
 import Service from "../models/Service.js";
@@ -11,6 +12,14 @@ import {
 } from "../utils/bookingEmails.js";
 
 const router = express.Router();
+
+function normalizeEmail(email = "") {
+  return String(email).trim().toLowerCase();
+}
+
+function normalizePhone(phone = "") {
+  return String(phone).replace(/\s+/g, "").trim();
+}
 
 function formatDateToISO(date) {
   const year = date.getFullYear();
@@ -81,6 +90,102 @@ function getCustomSlotsForDate(location, bookingDate, dayName) {
   }
 
   return null;
+}
+
+function buildCustomerConditions({ customerEmail, customerPhone }) {
+  const email = normalizeEmail(customerEmail);
+  const phone = normalizePhone(customerPhone);
+
+  const conditions = [];
+
+  if (email) conditions.push({ email });
+  if (phone) conditions.push({ phone });
+
+  return conditions;
+}
+
+async function findBlockedCustomer({ customerEmail, customerPhone }) {
+  const conditions = buildCustomerConditions({ customerEmail, customerPhone });
+
+  if (!conditions.length) return null;
+
+  return Customer.findOne({
+    $or: conditions,
+    isActive: false
+  });
+}
+
+async function createOrUpdateCustomerFromBooking(booking) {
+  const email = normalizeEmail(booking.customerEmail);
+  const phone = normalizePhone(booking.customerPhone);
+
+  if (!phone && !email) return null;
+
+  const conditions = [];
+  if (email) conditions.push({ email });
+  if (phone) conditions.push({ phone });
+
+  const existingCustomer = await Customer.findOne({ $or: conditions });
+
+  if (existingCustomer) {
+    existingCustomer.fullName = booking.customerName || existingCustomer.fullName;
+    existingCustomer.phone = phone || existingCustomer.phone;
+    existingCustomer.email = email || existingCustomer.email;
+
+    if (booking.location) {
+      existingCustomer.preferredLocationId = booking.location;
+    }
+
+    if (booking.barber) {
+      existingCustomer.preferredBarber = String(booking.barber);
+    }
+
+    await existingCustomer.save();
+    return existingCustomer;
+  }
+
+  return Customer.create({
+    fullName: booking.customerName,
+    phone,
+    email,
+    preferredLocationId: booking.location || null,
+    preferredBarber: booking.barber ? String(booking.barber) : "",
+    isActive: true
+  });
+}
+
+async function updateCustomerStatsFromBooking(booking) {
+  const conditions = buildCustomerConditions({
+    customerEmail: booking.customerEmail,
+    customerPhone: booking.customerPhone
+  });
+
+  if (!conditions.length) return null;
+
+  const customer = await Customer.findOne({ $or: conditions });
+  if (!customer) return null;
+
+  const customerBookings = await Booking.find({
+    $or: [
+      customer.email ? { customerEmail: customer.email } : null,
+      customer.phone ? { customerPhone: customer.phone } : null
+    ].filter(Boolean)
+  }).populate("service", "price");
+
+  const completed = customerBookings.filter((item) => item.status === "completed");
+  const cancelled = customerBookings.filter((item) => item.status === "cancelled");
+
+  customer.completedVisits = completed.length;
+  customer.cancelledVisits = cancelled.length;
+  customer.loyaltyVisitsProgress = completed.length % 10;
+  customer.loyaltyPoints = completed.length * 10;
+  customer.totalSpend = completed.reduce(
+    (sum, item) => sum + Number(item.service?.price || 0),
+    0
+  );
+
+  await customer.save();
+  return customer;
 }
 
 async function getPopulatedBookingById(id) {
@@ -345,6 +450,18 @@ router.post("/", async (req, res) => {
       });
     }
 
+    const blockedCustomer = await findBlockedCustomer({
+      customerEmail,
+      customerPhone
+    });
+
+    if (blockedCustomer) {
+      return res.status(403).json({
+        message:
+          "This customer is currently blocked from making bookings. Please contact the shop."
+      });
+    }
+
     const relationCheck = await validateBookingRelations({
       location,
       service,
@@ -358,6 +475,8 @@ router.post("/", async (req, res) => {
     }
 
     const normalizedBookingTime = normalizeTimeLabel(bookingTime);
+    const normalizedCustomerPhone = normalizePhone(customerPhone);
+    const normalizedCustomerEmail = normalizeEmail(customerEmail);
 
     const existingBooking = await Booking.findOne({
       barber,
@@ -380,13 +499,19 @@ router.post("/", async (req, res) => {
       bookingDate,
       bookingTime: normalizedBookingTime,
       customerName,
-      customerPhone,
-      customerEmail: customerEmail || "",
+      customerPhone: normalizedCustomerPhone,
+      customerEmail: normalizedCustomerEmail,
       notes: notes || "",
       phoneVerified: true
     });
 
     const populatedBooking = await getPopulatedBookingById(booking._id);
+
+    try {
+      await createOrUpdateCustomerFromBooking(booking);
+    } catch (customerError) {
+      console.error("Customer sync failed:", customerError.message);
+    }
 
     try {
       await sendBookingRequestReceivedEmail(populatedBooking || booking);
@@ -459,6 +584,18 @@ router.put("/:id", async (req, res) => {
       });
     }
 
+    const blockedCustomer = await findBlockedCustomer({
+      customerEmail,
+      customerPhone
+    });
+
+    if (blockedCustomer) {
+      return res.status(403).json({
+        message:
+          "This customer is currently blocked from making bookings. Please contact the shop."
+      });
+    }
+
     const relationCheck = await validateBookingRelations({
       location: nextLocation,
       service: nextService,
@@ -487,8 +624,8 @@ router.put("/:id", async (req, res) => {
     }
 
     existingBooking.customerName = customerName;
-    existingBooking.customerPhone = customerPhone;
-    existingBooking.customerEmail = customerEmail || "";
+    existingBooking.customerPhone = normalizePhone(customerPhone);
+    existingBooking.customerEmail = normalizeEmail(customerEmail);
     existingBooking.bookingDate = nextBookingDate;
     existingBooking.bookingTime = nextBookingTime;
     existingBooking.status = nextStatus;
@@ -498,6 +635,13 @@ router.put("/:id", async (req, res) => {
     existingBooking.notes = notes || "";
 
     await existingBooking.save();
+
+    try {
+      await createOrUpdateCustomerFromBooking(existingBooking);
+      await updateCustomerStatsFromBooking(existingBooking);
+    } catch (customerError) {
+      console.error("Customer sync failed:", customerError.message);
+    }
 
     const updatedBooking = await getPopulatedBookingById(existingBooking._id);
 
@@ -536,6 +680,13 @@ router.put("/:id/status", async (req, res) => {
     }
 
     const populatedBooking = await getPopulatedBookingById(booking._id);
+
+    try {
+      await createOrUpdateCustomerFromBooking(booking);
+      await updateCustomerStatsFromBooking(booking);
+    } catch (customerError) {
+      console.error("Customer stats update failed:", customerError.message);
+    }
 
     try {
       if (status === "confirmed") {

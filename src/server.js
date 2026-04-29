@@ -16,6 +16,7 @@ import serviceRoutes from "./routes/serviceRoutes.js";
 import galleryRoutes from "./routes/galleryRoutes.js";
 import publicBookingRoutes from "./routes/publicBookingRoutes.js";
 import { verifyMailer } from "./config/mailer.js";
+import customerRoutes from "./routes/customerRoutes.js";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -40,6 +41,7 @@ app.use("/api/roles", roleRoutes);
 app.use("/api/services", serviceRoutes);
 app.use("/api/gallery", galleryRoutes);
 app.use("/api/public", publicBookingRoutes);
+app.use("/api/customers", customerRoutes);
 
 async function startServer() {
   try {
