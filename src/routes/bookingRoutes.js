@@ -1,6 +1,7 @@
 // server/src/routes/bookingRoutes.js
 
 import express from "express";
+import jwt from "jsonwebtoken";
 import Booking from "../models/Booking.js";
 import Location from "../models/Location.js";
 import User from "../models/User.js";
@@ -49,6 +50,105 @@ function normalizeTimeLabel(value) {
   if (mins === null) return value;
 
   return minutesTo12Hour(mins);
+}
+
+function normalizeIrishPhone(phone) {
+  if (!phone) return "";
+
+  let value = String(phone)
+    .trim()
+    .replace(/[\s().-]/g, "");
+
+  if (value.startsWith("00")) value = `+${value.slice(2)}`;
+  if (value.startsWith("0")) value = `+353${value.slice(1)}`;
+  if (value.startsWith("353")) value = `+${value}`;
+
+  return value;
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function verifyBookingToken({ verificationToken, customerPhone, customerEmail }) {
+  if (!verificationToken) {
+    return {
+      ok: false,
+      status: 401,
+      message: "Secure verification token is required before booking"
+    };
+  }
+
+  if (!process.env.JWT_SECRET) {
+    return {
+      ok: false,
+      status: 500,
+      message: "JWT_SECRET is missing"
+    };
+  }
+
+  try {
+    const decoded = jwt.verify(verificationToken, process.env.JWT_SECRET);
+
+    if (decoded.type !== "booking_verification") {
+      return {
+        ok: false,
+        status: 401,
+        message: "Invalid verification token"
+      };
+    }
+
+    const safePhone = normalizeIrishPhone(customerPhone);
+    const safeEmail = normalizeEmail(customerEmail);
+
+    if (decoded.method === "phone") {
+      if (!decoded.phone || decoded.phone !== safePhone) {
+        return {
+          ok: false,
+          status: 401,
+          message: "Verified phone does not match booking phone"
+        };
+      }
+
+      return {
+        ok: true,
+        method: "phone",
+        verifiedContact: decoded.phone,
+        phoneVerified: true,
+        emailVerified: false
+      };
+    }
+
+    if (decoded.method === "email") {
+      if (!decoded.email || decoded.email !== safeEmail) {
+        return {
+          ok: false,
+          status: 401,
+          message: "Verified email does not match booking email"
+        };
+      }
+
+      return {
+        ok: true,
+        method: "email",
+        verifiedContact: decoded.email,
+        phoneVerified: false,
+        emailVerified: true
+      };
+    }
+
+    return {
+      ok: false,
+      status: 401,
+      message: "Unsupported verification method"
+    };
+  } catch {
+    return {
+      ok: false,
+      status: 401,
+      message: "Verification expired. Please verify again before booking."
+    };
+  }
 }
 
 function generateTimeSlots(start, end, interval = 30) {
@@ -127,7 +227,7 @@ async function createOrUpdateCustomerFromBooking(bookingInput) {
       phone,
       email,
       preferredBarber: booking.barber || null,
-      preferredLocation: booking.location || null,
+      preferredLocationId: booking.location || null,
       marketingEmailOptIn: false,
       marketingSmsOptIn: false,
       notes: "",
@@ -144,7 +244,7 @@ async function createOrUpdateCustomerFromBooking(bookingInput) {
     customer.phone = phone || customer.phone;
     customer.email = email || customer.email;
     customer.preferredBarber = customer.preferredBarber || booking.barber || null;
-    customer.preferredLocation = customer.preferredLocation || booking.location || null;
+    customer.preferredLocationId = customer.preferredLocationId || booking.location || null;
   }
 
   const bookings = await Booking.find(buildCustomerMatch({
@@ -164,7 +264,10 @@ async function createOrUpdateCustomerFromBooking(bookingInput) {
   customer.completedVisits = completed.length;
   customer.cancelledVisits = cancelled.length;
   customer.loyaltyVisitsProgress = completed.length % 10;
-  customer.loyaltyPoints = completed.length * 10;
+  // Preserve manually managed loyalty points. Do not overwrite wallet on sync.
+  if (typeof customer.loyaltyPoints !== "number") {
+    customer.loyaltyPoints = 0;
+  }
   customer.totalSpend = totalSpend;
 
   await customer.save();
@@ -427,7 +530,8 @@ router.post("/", async (req, res) => {
       notes,
       phoneVerified,
       emailVerified,
-      verificationMethod
+      verificationMethod,
+      verificationToken
     } = req.body;
 
     if (
@@ -444,9 +548,15 @@ router.post("/", async (req, res) => {
       });
     }
 
-    if (!phoneVerified && !emailVerified) {
-      return res.status(400).json({
-        message: "Phone or email must be verified before booking"
+    const verificationCheck = verifyBookingToken({
+      verificationToken,
+      customerPhone,
+      customerEmail
+    });
+
+    if (!verificationCheck.ok) {
+      return res.status(verificationCheck.status).json({
+        message: verificationCheck.message
       });
     }
 
@@ -496,12 +606,14 @@ router.post("/", async (req, res) => {
       bookingDate,
       bookingTime: normalizedBookingTime,
       customerName,
-      customerPhone,
-      customerEmail: customerEmail || "",
+      customerPhone: normalizeIrishPhone(customerPhone),
+      customerEmail: normalizeEmail(customerEmail),
       notes: notes || "",
-      phoneVerified: Boolean(phoneVerified),
-      emailVerified: Boolean(emailVerified),
-      verificationMethod: verificationMethod || (phoneVerified ? "phone" : "email")
+      phoneVerified: verificationCheck.phoneVerified,
+      emailVerified: verificationCheck.emailVerified,
+      verificationMethod: verificationCheck.method,
+      verifiedContact: verificationCheck.verifiedContact,
+      verifiedAt: new Date()
     });
 
     const populatedBooking = await getPopulatedBookingById(booking._id);

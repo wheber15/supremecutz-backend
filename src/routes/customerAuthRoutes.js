@@ -37,12 +37,15 @@ router.post("/login", async (req, res) => {
       ].filter(Boolean)
     });
 
-    // Auto-create customer if not exists
     if (!customer) {
-      customer = await Customer.create({
-        fullName: "Customer",
-        email: safeEmail,
-        phone: safePhone
+      return res.status(404).json({
+        message: "Customer account not found. Please make your first booking to create an account."
+      });
+    }
+
+    if (customer.isActive === false) {
+      return res.status(403).json({
+        message: "This customer account is currently blocked."
       });
     }
 

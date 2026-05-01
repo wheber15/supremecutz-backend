@@ -53,6 +53,29 @@ const bookingSchema = new mongoose.Schema(
     phoneVerified: {
       type: Boolean,
       default: false
+    },
+    emailVerified: {
+      type: Boolean,
+      default: false
+    },
+    verificationMethod: {
+      type: String,
+      enum: ["phone", "email", "legacy"],
+      default: "legacy"
+    },
+    verifiedContact: {
+      type: String,
+      default: "",
+      trim: true
+    },
+    verifiedAt: {
+      type: Date,
+      default: null
+    },
+    customer: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Customer",
+      default: null
     }
   },
   { timestamps: true }

@@ -9,7 +9,7 @@ const customerSchema = new mongoose.Schema(
     },
     phone: {
       type: String,
-      required: true,
+      default: "",
       trim: true
     },
     email: {
@@ -80,6 +80,17 @@ const customerSchema = new mongoose.Schema(
     isActive: {
       type: Boolean,
       default: true
+    },
+
+    lastVerifiedMethod: {
+      type: String,
+      enum: ["phone", "email", ""],
+      default: ""
+    },
+
+    lastVerifiedAt: {
+      type: Date,
+      default: null
     }
   },
   { timestamps: true }
