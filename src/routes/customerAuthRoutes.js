@@ -5,109 +5,109 @@ import Booking from "../models/Booking.js";
 
 const router = express.Router();
 
-function normalizeEmail(email = "") {
-  return String(email).trim().toLowerCase();
-}
-
-function normalizePhone(phone = "") {
-  return String(phone).replace(/\s+/g, "").trim();
-}
+const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
 
 /* =========================
-   CUSTOMER LOGIN (OTP BASED)
+   CUSTOMER LOGIN (OTP VERIFIED)
 ========================= */
-
 router.post("/login", async (req, res) => {
   try {
     const { email, phone } = req.body;
 
-    const safeEmail = normalizeEmail(email);
-    const safePhone = normalizePhone(phone);
-
-    if (!safeEmail && !safePhone) {
+    if (!email && !phone) {
       return res.status(400).json({
         message: "Email or phone is required"
       });
     }
 
-    let customer = await Customer.findOne({
-      $or: [
-        safeEmail ? { email: safeEmail } : null,
-        safePhone ? { phone: safePhone } : null
-      ].filter(Boolean)
-    });
+    let customer;
 
-    if (!customer) {
-      return res.status(404).json({
-        message: "Customer account not found. Please make your first booking to create an account."
-      });
+    // 🔍 Find or create customer
+    if (email) {
+      customer = await Customer.findOne({ email });
+
+      if (!customer) {
+        customer = await Customer.create({
+          email,
+          fullName: "Customer",
+          loyaltyPoints: 0,
+          completedVisits: 0
+        });
+      }
     }
 
-    if (customer.isActive === false) {
-      return res.status(403).json({
-        message: "This customer account is currently blocked."
-      });
+    if (phone) {
+      customer = await Customer.findOne({ phone });
+
+      if (!customer) {
+        customer = await Customer.create({
+          phone,
+          fullName: "Customer",
+          loyaltyPoints: 0,
+          completedVisits: 0
+        });
+      }
     }
 
-    if (!process.env.JWT_SECRET) {
-      return res.status(500).json({
-        message: "JWT_SECRET missing"
-      });
-    }
-
-    const token = jwt.sign(
+    // 🔒 Attach old bookings (IMPORTANT FIX)
+    await Booking.updateMany(
       {
-        customerId: String(customer._id),
-        type: "customer"
+        customer: null,
+        $or: [
+          { customerEmail: customer.email },
+          { customerPhone: customer.phone }
+        ]
       },
-      process.env.JWT_SECRET,
-      { expiresIn: "7d" }
+      { $set: { customer: customer._id } }
+    );
+
+    // 🔐 Generate token
+    const token = jwt.sign(
+      { id: customer._id },
+      JWT_SECRET,
+      { expiresIn: "30d" }
     );
 
     res.json({
-      message: "Login successful",
       token,
       customer
     });
 
   } catch (error) {
+    console.error("Customer login error:", error);
     res.status(500).json({
-      message: "Customer login failed",
-      error: error.message
+      message: "Login failed"
     });
   }
 });
 
 /* =========================
-   CUSTOMER DASHBOARD
+   GET CUSTOMER DATA
 ========================= */
-
 router.get("/me", async (req, res) => {
   try {
     const token = req.headers.authorization?.split(" ")[1];
 
     if (!token) {
-      return res.status(401).json({ message: "Unauthorized" });
+      return res.status(401).json({
+        message: "No token"
+      });
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
 
-    const customer = await Customer.findById(decoded.customerId);
+    const customer = await Customer.findById(decoded.id);
 
     if (!customer) {
-      return res.status(404).json({ message: "Customer not found" });
+      return res.status(404).json({
+        message: "Customer not found"
+      });
     }
 
+    // 🔒 ONLY THEIR BOOKINGS (MAIN FIX)
     const bookings = await Booking.find({
-      $or: [
-        { customerEmail: customer.email },
-        { customerPhone: customer.phone }
-      ]
-    })
-      .populate("location", "name")
-      .populate("service", "name price")
-      .populate("barber", "fullName barberDisplayName")
-      .sort({ createdAt: -1 });
+      customer: customer._id
+    }).sort({ createdAt: -1 });
 
     res.json({
       customer,
@@ -115,9 +115,9 @@ router.get("/me", async (req, res) => {
     });
 
   } catch (error) {
+    console.error("Customer fetch error:", error);
     res.status(500).json({
-      message: "Failed to fetch customer dashboard",
-      error: error.message
+      message: "Failed to load customer data"
     });
   }
 });
