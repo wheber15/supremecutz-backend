@@ -161,15 +161,23 @@ router.post("/login", async (req, res) => {
         ? { email: verified.email }
         : { phone: verified.phone };
 
-    let customer = await Customer.findOne(query);
+    const customer = await Customer.findOne(query);
 
+    // IMPORTANT SECURITY RULE:
+    // Customer login must NEVER create a customer account.
+    // First-time customers are created only through the booking flow after PHONE OTP.
     if (!customer) {
-      customer = await Customer.create({
-        fullName: "Customer",
-        email: verified.method === "email" ? verified.email : safeEmail,
-        phone: verified.method === "phone" ? verified.phone : safePhone,
-        lastVerifiedMethod: verified.method,
-        lastVerifiedAt: new Date()
+      return res.status(404).json({
+        message: "No customer account found. Please make your first booking with phone verification first."
+      });
+    }
+
+    // Blocks old/orphan email-only accounts that were accidentally created by earlier login code.
+    // A real customer profile must have a verified/normalised phone or linked bookings.
+    const linkedBookingCount = await Booking.countDocuments({ customer: customer._id });
+    if (!customer.phone && linkedBookingCount === 0) {
+      return res.status(403).json({
+        message: "This email is not linked to a phone-verified customer account yet. Please make your first booking first."
       });
     }
 

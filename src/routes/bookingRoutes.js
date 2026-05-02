@@ -101,6 +101,17 @@ async function getOrCreateVerifiedCustomer({
 
   let customer = await Customer.findOne(query);
 
+  // SECURITY RULE:
+  // First booking must verify a real Irish phone number.
+  // Email OTP is allowed only for returning customers already saved in the CRM.
+  if (!customer && verificationCheck.method === "email") {
+    return {
+      ok: false,
+      status: 403,
+      message: "For your first booking, please verify by phone. Returning customers can use email login."
+    };
+  }
+
   if (!customer) {
     customer = await Customer.create({
       fullName: String(customerName || "Customer").trim(),
@@ -397,6 +408,7 @@ router.get("/", async (_req, res) => {
       .populate("location", "name slug phone email")
       .populate("service", "name slug price durationMinutes")
       .populate("barber", "fullName barberDisplayName name barberSpecialty")
+      .populate("customer", "fullName email phone loyaltyPoints isActive")
       .sort({ bookingDate: 1, bookingTime: 1, createdAt: -1 });
 
     res.json(bookings);

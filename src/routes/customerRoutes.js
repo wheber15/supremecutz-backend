@@ -1,4 +1,5 @@
 import express from "express";
+import mongoose from "mongoose";
 import Customer from "../models/Customer.js";
 import Booking from "../models/Booking.js";
 import authMiddleware from "../middleware/authMiddleware.js";
@@ -77,6 +78,10 @@ router.get("/", authMiddleware, async (req, res) => {
         { email: { $regex: search, $options: "i" } },
         { phone: { $regex: search, $options: "i" } }
       ];
+
+      if (mongoose.Types.ObjectId.isValid(search)) {
+        query.$or.push({ _id: search });
+      }
     }
 
     const customers = await Customer.find(query)

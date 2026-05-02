@@ -2,6 +2,8 @@ import express from "express";
 import jwt from "jsonwebtoken";
 import { Resend } from "resend";
 import { createTwilioClient, getVerifyServiceSid } from "../config/twilio.js";
+import Customer from "../models/Customer.js";
+import Booking from "../models/Booking.js";
 
 const router = express.Router();
 
@@ -130,6 +132,39 @@ function createVerificationToken({ method, phone = "", email = "" }) {
     getJwtSecret(),
     { expiresIn: VERIFICATION_TOKEN_TTL }
   );
+}
+
+async function canUseEmailOtpForCustomerLogin(email) {
+  const customer = await Customer.findOne({ email: normalizeEmail(email) });
+
+  if (!customer) {
+    return {
+      ok: false,
+      status: 404,
+      message: "No customer account found for this email. Please make your first booking with phone verification."
+    };
+  }
+
+  if (customer.isActive === false) {
+    return {
+      ok: false,
+      status: 403,
+      message: "This customer account is currently blocked."
+    };
+  }
+
+  const hasRealBooking = await Booking.exists({ customer: customer._id });
+  const hasVerifiedPhone = Boolean(customer.phone);
+
+  if (!hasRealBooking && !hasVerifiedPhone) {
+    return {
+      ok: false,
+      status: 403,
+      message: "This email is not linked to a real customer profile yet. Please make your first booking with phone verification."
+    };
+  }
+
+  return { ok: true, customer };
 }
 
 /* =========================
@@ -263,6 +298,14 @@ router.post("/email/start", async (req, res) => {
       return res.status(400).json({
         message: "Temporary email addresses are not allowed. Please use your real email."
       });
+    }
+
+    // SECURITY RULE:
+    // Email OTP is for RETURNING CUSTOMER LOGIN only.
+    // Do not even send an email OTP unless the email belongs to a real customer profile.
+    const emailLoginCheck = await canUseEmailOtpForCustomerLogin(email);
+    if (!emailLoginCheck.ok) {
+      return res.status(emailLoginCheck.status).json({ message: emailLoginCheck.message });
     }
 
     const rateKey = `${req.ip}:${email}`;
