@@ -26,14 +26,9 @@ function buildCustomerMatch({ email, phone }) {
 }
 
 async function getCustomerBookings(customer) {
-  const match = buildCustomerMatch({
-    email: customer.email,
-    phone: customer.phone
-  });
+  if (!customer?._id) return [];
 
-  if (!match) return [];
-
-  return Booking.find(match)
+  return Booking.find({ customer: customer._id })
     .populate("location", "name slug")
     .populate("service", "name price durationMinutes")
     .populate("barber", "fullName name barberDisplayName")

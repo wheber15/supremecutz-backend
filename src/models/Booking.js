@@ -66,7 +66,8 @@ const bookingSchema = new mongoose.Schema(
     verifiedContact: {
       type: String,
       default: "",
-      trim: true
+      trim: true,
+      lowercase: true
     },
     verifiedAt: {
       type: Date,
@@ -75,11 +76,20 @@ const bookingSchema = new mongoose.Schema(
     customer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Customer",
-      default: null
+      default: null,
+      index: true
     }
   },
   { timestamps: true }
 );
+
+bookingSchema.index({
+  barber: 1,
+  location: 1,
+  bookingDate: 1,
+  bookingTime: 1,
+  status: 1
+});
 
 const Booking = mongoose.model("Booking", bookingSchema);
 

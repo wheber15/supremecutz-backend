@@ -70,6 +70,108 @@ function normalizeEmail(email) {
   return String(email || "").trim().toLowerCase();
 }
 
+
+function getVerifiedCustomerQuery(verificationCheck) {
+  if (verificationCheck.method === "email" && verificationCheck.verifiedContact) {
+    return { email: normalizeEmail(verificationCheck.verifiedContact) };
+  }
+
+  if (verificationCheck.method === "phone" && verificationCheck.verifiedContact) {
+    return { phone: normalizeIrishPhone(verificationCheck.verifiedContact) };
+  }
+
+  return null;
+}
+
+async function getOrCreateVerifiedCustomer({
+  verificationCheck,
+  customerName,
+  customerPhone,
+  customerEmail,
+  barber,
+  location
+}) {
+  const safeEmail = normalizeEmail(customerEmail);
+  const safePhone = normalizeIrishPhone(customerPhone);
+  const query = getVerifiedCustomerQuery(verificationCheck);
+
+  if (!query) {
+    return { ok: false, status: 401, message: "Could not identify verified customer" };
+  }
+
+  let customer = await Customer.findOne(query);
+
+  if (!customer) {
+    customer = await Customer.create({
+      fullName: String(customerName || "Customer").trim(),
+      phone: safePhone,
+      email: safeEmail,
+      preferredBarber: barber ? String(barber) : "",
+      preferredLocationId: location || null,
+      marketingEmailOptIn: false,
+      marketingSmsOptIn: false,
+      notes: "",
+      completedVisits: 0,
+      cancelledVisits: 0,
+      noShowCount: 0,
+      loyaltyPoints: 0,
+      loyaltyVisitsProgress: 0,
+      totalSpend: 0,
+      isActive: true,
+      lastVerifiedMethod: verificationCheck.method,
+      lastVerifiedAt: new Date()
+    });
+  } else {
+    if (customer.isActive === false) {
+      return {
+        ok: false,
+        status: 403,
+        message: "This customer account is currently blocked from making bookings."
+      };
+    }
+
+    customer.fullName = customerName || customer.fullName;
+    customer.phone = safePhone || customer.phone;
+    customer.email = safeEmail || customer.email;
+    customer.preferredBarber = customer.preferredBarber || (barber ? String(barber) : "");
+    customer.preferredLocationId = customer.preferredLocationId || location || null;
+    customer.lastVerifiedMethod = verificationCheck.method;
+    customer.lastVerifiedAt = new Date();
+
+    await customer.save();
+  }
+
+  return { ok: true, customer };
+}
+
+async function recalculateCustomerStatsById(customerId) {
+  if (!customerId) return null;
+
+  const customer = await Customer.findById(customerId);
+  if (!customer) return null;
+
+  const bookings = await Booking.find({ customer: customer._id })
+    .populate("service", "price")
+    .sort({ createdAt: -1 });
+
+  const completed = bookings.filter((item) => item.status === "completed");
+  const cancelled = bookings.filter((item) => item.status === "cancelled");
+
+  customer.completedVisits = completed.length;
+  customer.cancelledVisits = cancelled.length;
+  customer.loyaltyVisitsProgress = completed.length % 10;
+  customer.totalSpend = completed.reduce((sum, item) => {
+    return sum + Number(item.service?.price || 0);
+  }, 0);
+
+  if (typeof customer.loyaltyPoints !== "number") {
+    customer.loyaltyPoints = 0;
+  }
+
+  await customer.save();
+  return customer;
+}
+
 function verifyBookingToken({ verificationToken, customerPhone, customerEmail }) {
   if (!verificationToken) {
     return {
@@ -200,78 +302,20 @@ async function getPopulatedBookingById(id) {
   return Booking.findById(id)
     .populate("location", "name slug phone email")
     .populate("service", "name slug price durationMinutes")
-    .populate("barber", "fullName barberDisplayName name barberSpecialty");
+    .populate("barber", "fullName barberDisplayName name barberSpecialty")
+    .populate("customer", "fullName email phone loyaltyPoints isActive");
 }
 
 async function createOrUpdateCustomerFromBooking(bookingInput) {
-  const booking = await Booking.findById(bookingInput._id || bookingInput.id || bookingInput)
-    .populate("service", "price")
-    .lean();
+  const booking = await Booking.findById(bookingInput._id || bookingInput.id || bookingInput);
 
-  if (!booking) return null;
+  if (!booking?.customer) return null;
 
-  const email = booking.customerEmail
-    ? String(booking.customerEmail).trim().toLowerCase()
-    : "";
-
-  const phone = booking.customerPhone ? String(booking.customerPhone).trim() : "";
-
-  const match = buildCustomerMatch({ email, phone });
-  if (!match) return null;
-
-  let customer = await Customer.findOne(match);
-
-  if (!customer) {
-    customer = await Customer.create({
-      fullName: booking.customerName || "Customer",
-      phone,
-      email,
-      preferredBarber: booking.barber || null,
-      preferredLocationId: booking.location || null,
-      marketingEmailOptIn: false,
-      marketingSmsOptIn: false,
-      notes: "",
-      completedVisits: 0,
-      cancelledVisits: 0,
-      noShowCount: 0,
-      loyaltyPoints: 0,
-      loyaltyVisitsProgress: 0,
-      totalSpend: 0,
-      isActive: true
-    });
-  } else {
-    customer.fullName = booking.customerName || customer.fullName;
-    customer.phone = phone || customer.phone;
-    customer.email = email || customer.email;
-    customer.preferredBarber = customer.preferredBarber || booking.barber || null;
-    customer.preferredLocationId = customer.preferredLocationId || booking.location || null;
-  }
-
-  const bookings = await Booking.find(buildCustomerMatch({
-    email: customer.email,
-    phone: customer.phone
-  }))
-    .populate("service", "price")
-    .sort({ createdAt: -1 });
-
-  const completed = bookings.filter((item) => item.status === "completed");
-  const cancelled = bookings.filter((item) => item.status === "cancelled");
-
-  const totalSpend = completed.reduce((sum, item) => {
-    return sum + Number(item.service?.price || 0);
-  }, 0);
-
-  customer.completedVisits = completed.length;
-  customer.cancelledVisits = cancelled.length;
-  customer.loyaltyVisitsProgress = completed.length % 10;
-  // Preserve manually managed loyalty points. Do not overwrite wallet on sync.
-  if (typeof customer.loyaltyPoints !== "number") {
-    customer.loyaltyPoints = 0;
-  }
-  customer.totalSpend = totalSpend;
-
-  await customer.save();
-  return customer;
+  // SECURITY FIX:
+  // Customer statistics are now calculated only from Booking.customer.
+  // Never calculate history by loose email/phone matching, because shared phone
+  // numbers can leak booking history between different customers.
+  return recalculateCustomerStatsById(booking.customer);
 }
 
 async function validateBookingRelations({ location, service, barber }) {
@@ -560,9 +604,13 @@ router.post("/", async (req, res) => {
       });
     }
 
-    const customerCheck = await ensureCustomerCanBook({
+    const customerCheck = await getOrCreateVerifiedCustomer({
+      verificationCheck,
+      customerName,
+      customerPhone,
       customerEmail,
-      customerPhone
+      barber,
+      location
     });
 
     if (!customerCheck.ok) {
@@ -608,6 +656,7 @@ router.post("/", async (req, res) => {
       customerName,
       customerPhone: normalizeIrishPhone(customerPhone),
       customerEmail: normalizeEmail(customerEmail),
+      customer: customerCheck.customer._id,
       notes: notes || "",
       phoneVerified: verificationCheck.phoneVerified,
       emailVerified: verificationCheck.emailVerified,
@@ -615,6 +664,8 @@ router.post("/", async (req, res) => {
       verifiedContact: verificationCheck.verifiedContact,
       verifiedAt: new Date()
     });
+
+    await recalculateCustomerStatsById(customerCheck.customer._id);
 
     const populatedBooking = await getPopulatedBookingById(booking._id);
 
