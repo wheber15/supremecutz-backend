@@ -179,8 +179,9 @@ export async function sendBookingRequestReceivedEmail(booking) {
   });
 }
 
-export async function sendBookingConfirmedEmail(booking) {
+export async function sendBookingConfirmedEmail(booking, options = {}) {
   const d = getBookingDetails(booking);
+  const approvedByName = options.approvedByName || getName(booking?.approvedBy, "");
 
   await sendEmail({
     to: d.email,
@@ -191,11 +192,19 @@ export async function sendBookingConfirmedEmail(booking) {
       intro: `Hi ${escapeHtml(
         d.customerName
       )}, your Supreme Cutz appointment is confirmed.`,
-      detailsHtml: bookingDetailsBlock(d),
+      detailsHtml: `${bookingDetailsBlock(d)}${
+        approvedByName
+          ? `<p style="margin:12px 0 0;color:#9d9d9d;font-size:13px;line-height:1.6;">Approved by: ${escapeHtml(approvedByName)}</p>`
+          : ""
+      }`,
       footer:
         "Please arrive a few minutes early. If you need to cancel or change your booking, contact the shop."
     })
   });
+}
+
+export async function sendBookingApprovedEmail(booking, options = {}) {
+  return sendBookingConfirmedEmail(booking, options);
 }
 
 export async function sendBookingCancelledEmail(booking) {

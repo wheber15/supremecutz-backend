@@ -47,7 +47,7 @@ const bookingSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["pending", "confirmed", "completed", "cancelled"],
+      enum: ["pending", "confirmed", "in_progress", "completed", "cancelled", "no_show"],
       default: "pending"
     },
     phoneVerified: {
@@ -60,7 +60,7 @@ const bookingSchema = new mongoose.Schema(
     },
     verificationMethod: {
       type: String,
-      enum: ["phone", "email", "legacy"],
+      enum: ["phone", "email", "phone_email", "legacy"],
       default: "legacy"
     },
     verifiedContact: {
@@ -78,7 +78,16 @@ const bookingSchema = new mongoose.Schema(
       ref: "Customer",
       default: null,
       index: true
-    }
+    },
+    approvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null
+    },
+    approvedAt: {
+      type: Date,
+      default: null
+    },
   },
   { timestamps: true }
 );

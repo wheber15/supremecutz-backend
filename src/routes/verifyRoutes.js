@@ -282,6 +282,7 @@ router.post("/email/start", async (req, res) => {
     cleanupExpiredEmailOtps();
 
     const email = normalizeEmail(req.body.email);
+    const purpose = String(req.body.purpose || req.body.mode || "login").trim().toLowerCase();
 
     if (!email) {
       return res.status(400).json({ message: "Email is required" });
@@ -301,11 +302,13 @@ router.post("/email/start", async (req, res) => {
     }
 
     // SECURITY RULE:
-    // Email OTP is for RETURNING CUSTOMER LOGIN only.
-    // Do not even send an email OTP unless the email belongs to a real customer profile.
-    const emailLoginCheck = await canUseEmailOtpForCustomerLogin(email);
-    if (!emailLoginCheck.ok) {
-      return res.status(emailLoginCheck.status).json({ message: emailLoginCheck.message });
+    // Email OTP for customer LOGIN is returning-customer only.
+    // Email OTP for BOOKING is allowed because first bookings require BOTH phone + email verification before customer creation.
+    if (purpose !== "booking") {
+      const emailLoginCheck = await canUseEmailOtpForCustomerLogin(email);
+      if (!emailLoginCheck.ok) {
+        return res.status(emailLoginCheck.status).json({ message: emailLoginCheck.message });
+      }
     }
 
     const rateKey = `${req.ip}:${email}`;

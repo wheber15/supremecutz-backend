@@ -11,6 +11,7 @@ import authMiddleware from "../middleware/authMiddleware.js";
 import {
   sendBookingRequestReceivedEmail,
   sendBookingConfirmedEmail,
+  sendBookingApprovedEmail,
   sendBookingCancelledEmail,
   sendBookingCompletedFeedbackEmail
 } from "../utils/bookingEmails.js";
@@ -84,6 +85,60 @@ function getVerifiedCustomerQuery(verificationCheck) {
   return null;
 }
 
+function findMatchingCustomer({ phone, email }) {
+  const safePhone = normalizeIrishPhone(phone);
+  const safeEmail = normalizeEmail(email);
+  const conditions = [];
+
+  if (safePhone) conditions.push({ phone: safePhone });
+  if (safeEmail) conditions.push({ email: safeEmail });
+
+  if (!conditions.length) return null;
+  return Customer.findOne(conditions.length === 1 ? conditions[0] : { $or: conditions });
+}
+
+function contactMatchesCustomer(customer, { phone, email }) {
+  const safePhone = normalizeIrishPhone(phone);
+  const safeEmail = normalizeEmail(email);
+
+  if (safePhone && customer.phone && safePhone !== customer.phone) {
+    return false;
+  }
+
+  if (safeEmail && customer.email && safeEmail !== customer.email) {
+    return false;
+  }
+
+  return true;
+}
+
+function verifySingleBookingToken({ token, expectedPhone = "", expectedEmail = "", requiredMethod = "" }) {
+  if (!token || !process.env.JWT_SECRET) return null;
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    if (decoded.type !== "booking_verification") return null;
+    if (requiredMethod && decoded.method !== requiredMethod) return null;
+
+    if (decoded.method === "phone") {
+      const safePhone = normalizeIrishPhone(expectedPhone);
+      if (!decoded.phone || decoded.phone !== safePhone) return null;
+      return { method: "phone", verifiedContact: decoded.phone };
+    }
+
+    if (decoded.method === "email") {
+      const safeEmail = normalizeEmail(expectedEmail);
+      if (!decoded.email || decoded.email !== safeEmail) return null;
+      return { method: "email", verifiedContact: decoded.email };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 async function getOrCreateVerifiedCustomer({
   verificationCheck,
   customerName,
@@ -94,26 +149,44 @@ async function getOrCreateVerifiedCustomer({
 }) {
   const safeEmail = normalizeEmail(customerEmail);
   const safePhone = normalizeIrishPhone(customerPhone);
-  const query = getVerifiedCustomerQuery(verificationCheck);
 
-  if (!query) {
-    return { ok: false, status: 401, message: "Could not identify verified customer" };
-  }
-
-  let customer = await Customer.findOne(query);
-
-  // SECURITY RULE:
-  // First booking must verify a real Irish phone number.
-  // Email OTP is allowed only for returning customers already saved in the CRM.
-  if (!customer && verificationCheck.method === "email") {
+  if (!safePhone || !safeEmail) {
     return {
       ok: false,
-      status: 403,
-      message: "For your first booking, please verify by phone. Returning customers can use email login."
+      status: 400,
+      message: "Phone number and email address are both required for booking."
     };
   }
 
+  let customer = await findMatchingCustomer({ phone: safePhone, email: safeEmail });
+
+  if (customer?.isActive === false) {
+    return {
+      ok: false,
+      status: 403,
+      message: "This customer account is currently blocked from making bookings."
+    };
+  }
+
+  if (customer && !contactMatchesCustomer(customer, { phone: safePhone, email: safeEmail })) {
+    return {
+      ok: false,
+      status: 409,
+      message: "This phone or email already belongs to an existing customer account. Please use the original saved phone and email, or login to your customer account."
+    };
+  }
+
+  // New customers must verify BOTH phone and email.
+  // Returning customers can keep using their saved phone/email, but the booking contact must match the saved account.
   if (!customer) {
+    if (!verificationCheck.phoneVerified || !verificationCheck.emailVerified) {
+      return {
+        ok: false,
+        status: 401,
+        message: "First booking requires both phone and email verification."
+      };
+    }
+
     customer = await Customer.create({
       fullName: String(customerName || "Customer").trim(),
       phone: safePhone,
@@ -130,24 +203,32 @@ async function getOrCreateVerifiedCustomer({
       loyaltyVisitsProgress: 0,
       totalSpend: 0,
       isActive: true,
-      lastVerifiedMethod: verificationCheck.method,
+      phoneVerified: true,
+      emailVerified: true,
+      lastVerifiedMethod: "phone_email",
       lastVerifiedAt: new Date()
     });
   } else {
-    if (customer.isActive === false) {
+    const verifiedSavedPhone =
+      verificationCheck.phoneVerified && verificationCheck.verifiedPhone === customer.phone;
+    const verifiedSavedEmail =
+      verificationCheck.emailVerified && verificationCheck.verifiedEmail === customer.email;
+
+    if (!verifiedSavedPhone && !verifiedSavedEmail) {
       return {
         ok: false,
-        status: 403,
-        message: "This customer account is currently blocked from making bookings."
+        status: 401,
+        message: "Please verify the saved phone or email for this customer account before booking."
       };
     }
 
-    customer.fullName = customerName || customer.fullName;
-    customer.phone = safePhone || customer.phone;
-    customer.email = safeEmail || customer.email;
+    // Do NOT overwrite the original customer account name/email/phone.
+    // Booking.customerName can be different per appointment, but Customer.fullName remains the first saved name.
     customer.preferredBarber = customer.preferredBarber || (barber ? String(barber) : "");
     customer.preferredLocationId = customer.preferredLocationId || location || null;
-    customer.lastVerifiedMethod = verificationCheck.method;
+    customer.phoneVerified = customer.phoneVerified || verifiedSavedPhone;
+    customer.emailVerified = customer.emailVerified || verifiedSavedEmail;
+    customer.lastVerifiedMethod = verifiedSavedPhone && verifiedSavedEmail ? "phone_email" : verifiedSavedPhone ? "phone" : "email";
     customer.lastVerifiedAt = new Date();
 
     await customer.save();
@@ -184,85 +265,42 @@ async function recalculateCustomerStatsById(customerId) {
   return customer;
 }
 
-function verifyBookingToken({ verificationToken, customerPhone, customerEmail }) {
-  if (!verificationToken) {
+function verifyBookingToken({
+  verificationToken,
+  phoneVerificationToken,
+  emailVerificationToken,
+  customerPhone,
+  customerEmail
+}) {
+  const phoneCheck = verifySingleBookingToken({
+    token: phoneVerificationToken || verificationToken,
+    expectedPhone: customerPhone,
+    requiredMethod: phoneVerificationToken ? "phone" : ""
+  });
+
+  const emailCheck = verifySingleBookingToken({
+    token: emailVerificationToken || verificationToken,
+    expectedEmail: customerEmail,
+    requiredMethod: emailVerificationToken ? "email" : ""
+  });
+
+  if (!phoneCheck && !emailCheck) {
     return {
       ok: false,
       status: 401,
-      message: "Secure verification token is required before booking"
+      message: "Secure phone or email verification is required before booking."
     };
   }
 
-  if (!process.env.JWT_SECRET) {
-    return {
-      ok: false,
-      status: 500,
-      message: "JWT_SECRET is missing"
-    };
-  }
-
-  try {
-    const decoded = jwt.verify(verificationToken, process.env.JWT_SECRET);
-
-    if (decoded.type !== "booking_verification") {
-      return {
-        ok: false,
-        status: 401,
-        message: "Invalid verification token"
-      };
-    }
-
-    const safePhone = normalizeIrishPhone(customerPhone);
-    const safeEmail = normalizeEmail(customerEmail);
-
-    if (decoded.method === "phone") {
-      if (!decoded.phone || decoded.phone !== safePhone) {
-        return {
-          ok: false,
-          status: 401,
-          message: "Verified phone does not match booking phone"
-        };
-      }
-
-      return {
-        ok: true,
-        method: "phone",
-        verifiedContact: decoded.phone,
-        phoneVerified: true,
-        emailVerified: false
-      };
-    }
-
-    if (decoded.method === "email") {
-      if (!decoded.email || decoded.email !== safeEmail) {
-        return {
-          ok: false,
-          status: 401,
-          message: "Verified email does not match booking email"
-        };
-      }
-
-      return {
-        ok: true,
-        method: "email",
-        verifiedContact: decoded.email,
-        phoneVerified: false,
-        emailVerified: true
-      };
-    }
-
-    return {
-      ok: false,
-      status: 401,
-      message: "Unsupported verification method"
-    };
-  } catch {
-    return {
-      ok: false,
-      status: 401,
-      message: "Verification expired. Please verify again before booking."
-    };
-  }
+  return {
+    ok: true,
+    method: phoneCheck && emailCheck ? "phone_email" : phoneCheck ? "phone" : "email",
+    verifiedContact: phoneCheck?.verifiedContact || emailCheck?.verifiedContact || "",
+    verifiedPhone: phoneCheck?.verifiedContact || "",
+    verifiedEmail: emailCheck?.verifiedContact || "",
+    phoneVerified: Boolean(phoneCheck),
+    emailVerified: Boolean(emailCheck)
+  };
 }
 
 function generateTimeSlots(start, end, interval = 30) {
@@ -315,7 +353,8 @@ async function getPopulatedBookingById(id) {
     .populate("location", "name slug phone email")
     .populate("service", "name slug price durationMinutes")
     .populate("barber", "fullName barberDisplayName name barberSpecialty")
-    .populate("customer", "fullName email phone loyaltyPoints isActive");
+    .populate("customer", "fullName email phone loyaltyPoints isActive")
+    .populate("approvedBy", "fullName name barberDisplayName role");
 }
 
 async function createOrUpdateCustomerFromBooking(bookingInput) {
@@ -630,7 +669,14 @@ router.put("/barber/:id/status", authMiddleware, async (req, res) => {
       return res.status(403).json({ message: "This booking is not assigned to you" });
     }
 
+    const previousStatus = booking.status;
     booking.status = status;
+
+    if (status === "confirmed" && previousStatus !== "confirmed") {
+      booking.approvedBy = req.user?._id || req.user?.id || null;
+      booking.approvedAt = new Date();
+    }
+
     await booking.save();
 
     const populatedBooking = await getPopulatedBookingById(booking._id);
@@ -638,6 +684,13 @@ router.put("/barber/:id/status", authMiddleware, async (req, res) => {
     createOrUpdateCustomerFromBooking(booking).catch((customerError) => {
       console.error("Customer sync failed:", customerError.message);
     });
+
+    if (status === "confirmed") {
+      const approverName = req.user?.fullName || req.user?.name || req.user?.barberDisplayName || "Supreme Cutz team";
+      sendBookingApprovedEmail(populatedBooking || booking, { approvedByName: approverName }).catch((mailError) => {
+        console.error("Approved email failed:", mailError.message);
+      });
+    }
 
     if (status === "completed") {
       sendBookingCompletedFeedbackEmail(populatedBooking || booking).catch((mailError) => {
@@ -731,7 +784,9 @@ router.post("/", async (req, res) => {
       phoneVerified,
       emailVerified,
       verificationMethod,
-      verificationToken
+      verificationToken,
+      phoneVerificationToken,
+      emailVerificationToken
     } = req.body;
 
     if (
@@ -750,6 +805,8 @@ router.post("/", async (req, res) => {
 
     const verificationCheck = verifyBookingToken({
       verificationToken,
+      phoneVerificationToken,
+      emailVerificationToken,
       customerPhone,
       customerEmail
     });
@@ -968,15 +1025,19 @@ router.put("/:id/status", async (req, res) => {
       });
     }
 
-    const booking = await Booking.findByIdAndUpdate(
-      req.params.id,
-      { status },
-      { returnDocument: "after" }
-    );
+    const booking = await Booking.findById(req.params.id);
 
     if (!booking) {
       return res.status(404).json({ message: "Booking not found" });
     }
+
+    const previousStatus = booking.status;
+    booking.status = status;
+    if (status === "confirmed" && previousStatus !== "confirmed") {
+      booking.approvedBy = req.user?._id || req.user?.id || null;
+      booking.approvedAt = new Date();
+    }
+    await booking.save();
 
     const populatedBooking = await getPopulatedBookingById(booking._id);
 
@@ -990,7 +1051,8 @@ router.put("/:id/status", async (req, res) => {
     });
 
     if (status === "confirmed") {
-      sendBookingConfirmedEmail(populatedBooking || booking).catch((mailError) => {
+      const approverName = populatedBooking?.approvedBy?.fullName || populatedBooking?.approvedBy?.name || "Supreme Cutz team";
+      sendBookingApprovedEmail(populatedBooking || booking, { approvedByName: approverName }).catch((mailError) => {
         console.error("Confirmed email failed:", mailError.message);
       });
     }
