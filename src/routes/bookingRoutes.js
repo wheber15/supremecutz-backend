@@ -7,6 +7,7 @@ import Location from "../models/Location.js";
 import User from "../models/User.js";
 import Service from "../models/Service.js";
 import Customer from "../models/Customer.js";
+import authMiddleware from "../middleware/authMiddleware.js";
 import {
   sendBookingRequestReceivedEmail,
   sendBookingConfirmedEmail,
@@ -526,7 +527,7 @@ router.get("/availability", async (req, res) => {
       barber,
       location,
       bookingDate,
-      status: { $in: ["pending", "confirmed"] }
+      status: { $in: ["pending", "confirmed", "in_progress"] }
     }).select("bookingTime");
 
     const bookedSlots = bookings
@@ -551,6 +552,149 @@ router.get("/availability", async (req, res) => {
       error: error.message,
       bookedSlots: [],
       availableSlots: []
+    });
+  }
+});
+
+
+
+/* =========================
+   AUTHENTICATED BARBER APP
+   Barber role only sees their own bookings. Managers/owners/founder can use this as staff mode too.
+========================= */
+router.get("/barber/me", authMiddleware, async (req, res) => {
+  try {
+    const date = req.query.date || formatDateToISO(new Date());
+    const tab = String(req.query.tab || "today");
+    const user = req.user;
+
+    const allowedRoles = ["barber", "staff", "manager", "supervisor", "owner", "founder"];
+    if (!allowedRoles.includes(user.role)) {
+      return res.status(403).json({ message: "Staff access required" });
+    }
+
+    const query = {};
+
+    if (user.role === "barber") {
+      query.barber = user._id;
+    } else if (user.primaryLocationId?._id || user.primaryLocationId) {
+      query.location = user.primaryLocationId?._id || user.primaryLocationId;
+    }
+
+    if (tab === "history") {
+      query.status = { $in: ["completed", "cancelled", "no_show"] };
+      if (req.query.date) query.bookingDate = date;
+    } else {
+      query.bookingDate = date;
+      query.status = { $in: ["pending", "confirmed", "in_progress"] };
+    }
+
+    const bookings = await Booking.find(query)
+      .populate("location", "name slug phone email")
+      .populate("service", "name slug price durationMinutes")
+      .populate("barber", "fullName barberDisplayName name barberSpecialty")
+      .populate("customer", "fullName email phone loyaltyPoints isActive")
+      .sort(tab === "history" ? { bookingDate: -1, bookingTime: -1, createdAt: -1 } : { bookingTime: 1, createdAt: -1 });
+
+    res.json({
+      date,
+      tab,
+      staff: user,
+      count: bookings.length,
+      bookings
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to fetch barber bookings",
+      error: error.message
+    });
+  }
+});
+
+router.put("/barber/:id/status", authMiddleware, async (req, res) => {
+  try {
+    const { status } = req.body;
+    const allowedStatuses = ["pending", "confirmed", "in_progress", "completed", "cancelled", "no_show"];
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({ message: "Invalid booking status" });
+    }
+
+    const booking = await Booking.findById(req.params.id);
+
+    if (!booking) {
+      return res.status(404).json({ message: "Booking not found" });
+    }
+
+    if (req.user.role === "barber" && String(booking.barber) !== String(req.user._id)) {
+      return res.status(403).json({ message: "This booking is not assigned to you" });
+    }
+
+    booking.status = status;
+    await booking.save();
+
+    const populatedBooking = await getPopulatedBookingById(booking._id);
+
+    createOrUpdateCustomerFromBooking(booking).catch((customerError) => {
+      console.error("Customer sync failed:", customerError.message);
+    });
+
+    if (status === "completed") {
+      sendBookingCompletedFeedbackEmail(populatedBooking || booking).catch((mailError) => {
+        console.error("Feedback email failed:", mailError.message);
+      });
+    }
+
+    res.json({
+      message: "Booking status updated",
+      booking: populatedBooking || booking
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to update booking status",
+      error: error.message
+    });
+  }
+});
+
+/* =========================
+   BARBER / STAFF DASHBOARD
+   Returns today's bookings with populated customer/service/location/barber names.
+   Keep this BEFORE /:id so Express does not treat "barber" as an id.
+========================= */
+router.get("/barber/today", async (req, res) => {
+  try {
+    const date = req.query.date || formatDateToISO(new Date());
+    const barber = req.query.barber || "";
+    const location = req.query.location || "";
+
+    const query = { bookingDate: date };
+
+    if (barber) query.barber = barber;
+    if (location) query.location = location;
+
+    // By default show active shop workflow for the day. Completed can still show
+    // if showCompleted=true is passed from the dashboard.
+    if (req.query.showCompleted !== "true") {
+      query.status = { $in: ["pending", "confirmed", "in_progress"] };
+    }
+
+    const bookings = await Booking.find(query)
+      .populate("location", "name slug phone email")
+      .populate("service", "name slug price durationMinutes")
+      .populate("barber", "fullName barberDisplayName name barberSpecialty")
+      .populate("customer", "fullName email phone loyaltyPoints isActive")
+      .sort({ bookingTime: 1, createdAt: -1 });
+
+    res.json({
+      date,
+      count: bookings.length,
+      bookings
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to fetch barber bookings",
+      error: error.message
     });
   }
 });
@@ -650,7 +794,7 @@ router.post("/", async (req, res) => {
       location,
       bookingDate,
       bookingTime: normalizedBookingTime,
-      status: { $in: ["pending", "confirmed"] }
+      status: { $in: ["pending", "confirmed", "in_progress"] }
     });
 
     if (existingBooking) {
@@ -747,7 +891,7 @@ router.put("/:id", async (req, res) => {
       });
     }
 
-    const allowedStatuses = ["pending", "confirmed", "completed", "cancelled"];
+    const allowedStatuses = ["pending", "confirmed", "in_progress", "completed", "cancelled", "no_show"];
     if (!allowedStatuses.includes(nextStatus)) {
       return res.status(400).json({
         message: "Invalid booking status"
@@ -772,7 +916,7 @@ router.put("/:id", async (req, res) => {
       location: nextLocation,
       bookingDate: nextBookingDate,
       bookingTime: nextBookingTime,
-      status: { $in: ["pending", "confirmed"] }
+      status: { $in: ["pending", "confirmed", "in_progress"] }
     });
 
     if (conflictingBooking) {
@@ -816,7 +960,7 @@ router.put("/:id/status", async (req, res) => {
   try {
     const { status } = req.body;
 
-    const allowedStatuses = ["pending", "confirmed", "completed", "cancelled"];
+    const allowedStatuses = ["pending", "confirmed", "in_progress", "completed", "cancelled", "no_show"];
 
     if (!allowedStatuses.includes(status)) {
       return res.status(400).json({

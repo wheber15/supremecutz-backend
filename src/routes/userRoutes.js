@@ -55,7 +55,7 @@ router.get(
       const users = await User.find()
         .populate("locationIds", "name slug")
         .populate("primaryLocationId", "name slug")
-        .select("-passwordHash")
+        .select("-passwordHash -staffPinHash")
         .sort({ createdAt: -1 });
 
       res.json(users);
@@ -76,6 +76,7 @@ router.post(
         name,
         email,
         password,
+        staffPin,
         phone,
         role,
         permissions,
@@ -109,6 +110,7 @@ router.post(
       }
 
       const passwordHash = await bcrypt.hash(password, 10);
+      const staffPinHash = staffPin ? await bcrypt.hash(String(staffPin).trim(), 10) : "";
 
       const isBarber = resolvedRole === "barber";
 
@@ -117,6 +119,7 @@ router.post(
         name: resolvedName,
         email: resolvedEmail,
         passwordHash,
+        staffPinHash,
         phone: phone || "",
         role: resolvedRole,
         permissions: Array.isArray(permissions) ? permissions : [],
@@ -142,7 +145,7 @@ router.post(
       const safeUser = await User.findById(user._id)
         .populate("locationIds", "name slug")
         .populate("primaryLocationId", "name slug")
-        .select("-passwordHash");
+        .select("-passwordHash -staffPinHash");
 
       res.status(201).json(safeUser);
     } catch (err) {
@@ -160,6 +163,7 @@ router.put(
       const updateData = { ...req.body };
 
       delete updateData.passwordHash;
+      delete updateData.staffPinHash;
 
       if (updateData.email) {
         updateData.email = normalizeEmail(updateData.email);
@@ -194,6 +198,15 @@ router.put(
         delete updateData.password;
       }
 
+      if ("staffPin" in updateData) {
+        const nextPin = String(updateData.staffPin || "").trim();
+        delete updateData.staffPin;
+
+        if (nextPin) {
+          updateData.staffPinHash = await bcrypt.hash(nextPin, 10);
+        }
+      }
+
       if (updateData.role === "barber") {
         updateData.isBookableBarber = true;
 
@@ -213,7 +226,7 @@ router.put(
       )
         .populate("locationIds", "name slug")
         .populate("primaryLocationId", "name slug")
-        .select("-passwordHash");
+        .select("-passwordHash -staffPinHash");
 
       if (!updated) {
         return res.status(404).json({ message: "User not found" });

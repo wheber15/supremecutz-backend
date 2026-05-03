@@ -27,6 +27,11 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: true
     },
+    staffPinHash: {
+      type: String,
+      default: "",
+      select: false
+    },
     phone: {
       type: String,
       default: "",
