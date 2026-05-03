@@ -77,6 +77,7 @@ router.post(
         email,
         password,
         staffPin,
+        pin,
         phone,
         role,
         permissions,
@@ -97,9 +98,9 @@ router.post(
       const resolvedLocationIds = normalizeLocationIds(locationIds);
       const resolvedSpecialties = normalizeSpecialties(specialties);
 
-      if (!resolvedName || !resolvedEmail || !password || !resolvedRole) {
+      if (!resolvedName || !resolvedEmail || !resolvedRole) {
         return res.status(400).json({
-          message: "fullName/name, email, password, and role are required"
+          message: "fullName/name, email, and role are required"
         });
       }
 
@@ -109,8 +110,11 @@ router.post(
         return res.status(409).json({ message: "Email already exists" });
       }
 
-      const passwordHash = await bcrypt.hash(password, 10);
-      const staffPinHash = staffPin ? await bcrypt.hash(String(staffPin).trim(), 10) : "";
+      const resolvedPassword = password || `TEMP-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const passwordHash = await bcrypt.hash(String(resolvedPassword), 10);
+
+      const resolvedStaffPin = String(staffPin || pin || "").trim();
+      const staffPinHash = resolvedStaffPin ? await bcrypt.hash(resolvedStaffPin, 10) : "";
 
       const isBarber = resolvedRole === "barber";
 
@@ -198,9 +202,12 @@ router.put(
         delete updateData.password;
       }
 
-      if ("staffPin" in updateData) {
-        const nextPin = String(updateData.staffPin || "").trim();
-        delete updateData.staffPin;
+      const incomingStaffPin = updateData.staffPin ?? updateData.pin;
+      delete updateData.staffPin;
+      delete updateData.pin;
+
+      if (incomingStaffPin !== undefined) {
+        const nextPin = String(incomingStaffPin || "").trim();
 
         if (nextPin) {
           updateData.staffPinHash = await bcrypt.hash(nextPin, 10);

@@ -60,7 +60,7 @@ async function findActiveStaffByEmail(email, includePin = false) {
     .populate("locationIds", "name slug")
     .populate("primaryLocationId", "name slug");
 
-  if (includePin) query = query.select("+staffPinHash");
+  if (includePin) query = query.select("+staffPinHash +passwordHash");
 
   const user = await query;
 
@@ -193,11 +193,21 @@ router.post("/staff/pin-login", async (req, res) => {
 
     const user = await findActiveStaffByEmail(email, true);
 
-    if (!user || !user.staffPinHash) {
+    if (!user) {
       return res.status(401).json({ message: "Invalid staff login details" });
     }
 
-    const pinOk = await bcrypt.compare(pin, user.staffPinHash);
+    let pinOk = false;
+
+    if (user.staffPinHash) {
+      pinOk = await bcrypt.compare(pin, user.staffPinHash);
+    }
+
+    // Temporary safety fallback for old staff records created before PIN hashing existed.
+    // This lets a staff member login with the value that was previously saved as their password.
+    if (!pinOk && user.passwordHash) {
+      pinOk = await bcrypt.compare(pin, user.passwordHash);
+    }
 
     if (!pinOk) {
       return res.status(401).json({ message: "Invalid staff login details" });
